@@ -2,12 +2,25 @@
 
 > 🇺🇸 English | [🇧🇷 Português](./README.pt-BR.md)
 
-**A high-performance, asynchronous implementation of the Raft Consensus Algorithm powering a distributed Key-Value store in Rust.**
+**An advanced architectural case study in distributed consensus — implementing the Raft algorithm from scratch in Rust to explore leader election, log replication, and fault tolerance under real network conditions.**
 
 ![Raft](https://img.shields.io/badge/Algorithm-Raft-blue.svg)
 ![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)
 ![Tokio](https://img.shields.io/badge/Async-Tokio-purple.svg)
 ![Docker](https://img.shields.io/badge/Infra-Docker--Compose-2496ED.svg)
+
+---
+
+## 🎯 Engineering Objectives
+
+Most CS courses teach distributed consensus theory through papers. This project was built to go further: to understand what it actually takes to implement Raft's guarantees in a real async runtime with real network I/O.
+
+**Core challenges explored:**
+- How do you prevent split votes in a cluster with simultaneous election timeouts? (Randomized timeout windows)
+- How do you maintain strong consistency with concurrent reads and writes across nodes? (Async `RwLock` semantics)
+- How do failures cascade through a cluster and what does recovery look like in practice?
+
+> Built as a self-directed systems programming study — applying distributed systems theory (Lamport, Ongaro & Ousterhout) to a working implementation, not a tutorial.
 
 ---
 
@@ -41,7 +54,7 @@ Every node transitions autonomously between three roles:
 | **Candidate** | Increments term, votes for itself, sends `RequestVote` RPCs to all peers via TCP. |
 | **Leader** | Sends periodic `AppendEntries` (heartbeat) RPCs to maintain authority and replicate log. |
 
-Election timeouts are randomized (150–300ms) to prevent split votes.
+Election timeouts are **randomized (150–300ms)** to prevent split votes — a key Raft insight: probabilistic staggering is cheaper and more reliable than coordination.
 
 ### Network Layer (`src/network.rs`)
 
@@ -54,7 +67,7 @@ All inter-node communication happens over **raw TCP connections** using `tokio::
 
 A thread-safe, high-concurrency in-memory Key-Value store backed by `tokio::sync::RwLock`:
 - **Multiple concurrent reads** allowed without blocking.
-- **Exclusive writes** guaranteed via async write locks — no data races.
+- **Exclusive writes** guaranteed via async write locks — no data races under concurrent load.
 
 ---
 
@@ -108,7 +121,8 @@ raftkv/
 - [ ] Log replication with actual entries (not just heartbeats)
 - [ ] Client-facing HTTP API for GET/SET operations
 - [ ] Membership changes (add/remove nodes at runtime)
+- [ ] Chaos testing: simulate node crashes and network partitions mid-election
 
 ---
 
-*Developed by Pedro Leanza — Distributed Systems & Systems Programming.*
+*Pedro Leanza — CS Student · AI-Augmented Engineering · Distributed Systems*
