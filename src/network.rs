@@ -3,8 +3,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use serde::{Serialize, Deserialize};
 use log::{info, warn, error};
-
-// ─── RPC Message Types ───────────────────────────────────────────────────────
+use tokio_util::sync::CancellationToken;
+use crate::raft::RaftState;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppendEntriesReq {
@@ -36,8 +36,6 @@ pub struct RequestVoteResp {
     pub vote_granted: bool,
 }
 
-// ─── RPC Envelope (discriminated union over TCP) ──────────────────────────────
-
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum RpcMessage {
@@ -47,13 +45,8 @@ pub enum RpcMessage {
     AppendEntriesResp(AppendEntriesResp),
 }
 
-// ─── TCP RPC Client ───────────────────────────────────────────────────────────
-
-/// Sends a `RequestVote` RPC to `peer_addr` and returns the response.
-/// Each call opens a fresh connection (stateless RPC style).
 pub async fn send_request_vote(peer_addr: &str, req: RequestVoteReq) -> Option<RequestVoteResp> {
     let timeout = Duration::from_millis(150);
-
     let stream = match tokio::time::timeout(timeout, TcpStream::connect(peer_addr)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
@@ -65,14 +58,11 @@ pub async fn send_request_vote(peer_addr: &str, req: RequestVoteReq) -> Option<R
             return None;
         }
     };
-
     send_rpc_and_recv::<RequestVoteResp>(stream, RpcMessage::RequestVote(req)).await
 }
 
-/// Sends an `AppendEntries` (heartbeat) RPC to `peer_addr`.
 pub async fn send_append_entries(peer_addr: &str, req: AppendEntriesReq) -> Option<AppendEntriesResp> {
     let timeout = Duration::from_millis(100);
-
     let stream = match tokio::time::timeout(timeout, TcpStream::connect(peer_addr)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
@@ -84,12 +74,9 @@ pub async fn send_append_entries(peer_addr: &str, req: AppendEntriesReq) -> Opti
             return None;
         }
     };
-
     send_rpc_and_recv::<AppendEntriesResp>(stream, RpcMessage::AppendEntries(req)).await
 }
 
-/// Generic helper: serialises `msg` as bincode with a length prefix, writes it, and
-/// reads back a length-prefixed bincode response deserialised as `R`.
 async fn send_rpc_and_recv<R>(mut stream: TcpStream, msg: RpcMessage) -> Option<R>
 where
     R: for<'de> Deserialize<'de>,
@@ -111,19 +98,14 @@ where
 
     let mut resp_buf = vec![0u8; resp_len];
     stream.read_exact(&mut resp_buf).await.ok()?;
-
     bincode::deserialize(&resp_buf).ok()
 }
 
-// ─── TCP RPC Server ───────────────────────────────────────────────────────────
-
-/// Starts a TCP listener on `listen_addr` that handles incoming Raft RPCs.
-/// `node_state` is shared via Arc<RwLock<_>> from raft.rs.
 pub async fn start_rpc_server(
     listen_addr: String,
     node_id: u64,
-    voted_for: std::sync::Arc<tokio::sync::RwLock<Option<u64>>>,
-    current_term: std::sync::Arc<tokio::sync::RwLock<u64>>,
+    state: std::sync::Arc<tokio::sync::RwLock<RaftState>>,
+    token: CancellationToken,
 ) {
     let listener = match TcpListener::bind(&listen_addr).await {
         Ok(l) => {
@@ -137,16 +119,23 @@ pub async fn start_rpc_server(
     };
 
     loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                let vf = voted_for.clone();
-                let ct = current_term.clone();
-                tokio::spawn(async move {
-                    handle_rpc_connection(stream, peer.to_string(), node_id, vf, ct).await;
-                });
+        tokio::select! {
+            _ = token.cancelled() => {
+                info!("Node {}: shutting down RPC server", node_id);
+                break;
             }
-            Err(e) => {
-                error!("Node {}: accept error: {}", node_id, e);
+            accept_res = listener.accept() => {
+                match accept_res {
+                    Ok((stream, peer)) => {
+                        let st = state.clone();
+                        tokio::spawn(async move {
+                            handle_rpc_connection(stream, peer.to_string(), node_id, st).await;
+                        });
+                    }
+                    Err(e) => {
+                        error!("Node {}: accept error: {}", node_id, e);
+                    }
+                }
             }
         }
     }
@@ -156,8 +145,7 @@ async fn handle_rpc_connection(
     mut stream: TcpStream,
     peer: String,
     node_id: u64,
-    voted_for: std::sync::Arc<tokio::sync::RwLock<Option<u64>>>,
-    current_term: std::sync::Arc<tokio::sync::RwLock<u64>>,
+    state: std::sync::Arc<tokio::sync::RwLock<RaftState>>,
 ) {
     let mut len_buf = [0u8; 4];
     if stream.read_exact(&mut len_buf).await.is_err() {
@@ -185,24 +173,35 @@ async fn handle_rpc_connection(
 
     let resp_msg = match msg {
         RpcMessage::RequestVote(req) => {
-            let ct = *current_term.read().await;
-            let mut vf = voted_for.write().await;
-
-            let vote_granted = req.term >= ct && (vf.is_none() || *vf == Some(req.candidate_id));
-
+            // Atomic mutation logic
+            let mut st = state.write().await;
+            
+            let vote_granted = req.term >= st.current_term && (st.voted_for.is_none() || st.voted_for == Some(req.candidate_id));
             if vote_granted {
-                *vf = Some(req.candidate_id);
+                st.voted_for = Some(req.candidate_id);
+                if req.term > st.current_term {
+                    st.current_term = req.term;
+                }
                 info!("Node {}: granted vote to Node {} for term {}", node_id, req.candidate_id, req.term);
             } else {
                 info!("Node {}: denied vote to Node {} (already voted or stale term)", node_id, req.candidate_id);
             }
-
-            RpcMessage::RequestVoteResp(RequestVoteResp { term: ct, vote_granted })
+            RpcMessage::RequestVoteResp(RequestVoteResp { term: st.current_term, vote_granted })
         }
         RpcMessage::AppendEntries(req) => {
-            let ct = *current_term.read().await;
-            let success = req.term >= ct;
-            RpcMessage::AppendEntriesResp(AppendEntriesResp { term: ct, success })
+            let mut st = state.write().await;
+            let success = req.term >= st.current_term;
+            if success {
+                if req.term > st.current_term {
+                    st.current_term = req.term;
+                    st.voted_for = None;
+                }
+                // When append entries is received successfully, we should step down to Follower
+                // if we are a Candidate. This is handled gracefully next time the main loop 
+                // evaluates the state, but we ensure consistency here.
+                st.role = crate::raft::NodeRole::Follower;
+            }
+            RpcMessage::AppendEntriesResp(AppendEntriesResp { term: st.current_term, success })
         }
         _ => {
             warn!("Node {}: unexpected RPC type from {}", node_id, peer);

@@ -22,3 +22,4 @@ env_logger = "0.10"
 # Geração de números aleatórios (para timeouts de eleição)
 rand = "0.8"
 bincode = "1.3.3"
+tokio-util = "0.7.18"

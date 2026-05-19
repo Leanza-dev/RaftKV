@@ -3,6 +3,7 @@ use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 use rand::Rng;
 use log::{info, warn};
+use tokio_util::sync::CancellationToken;
 
 use crate::network::{
     send_request_vote, send_append_entries,
@@ -32,84 +33,88 @@ pub struct RaftState {
 
 pub struct RaftNode {
     pub id: u64,
-    /// Arc<RwLock> over current_term, shared with the RPC server
-    pub current_term: Arc<RwLock<u64>>,
-    /// Arc<RwLock> over voted_for, shared with the RPC server
-    pub voted_for: Arc<RwLock<Option<u64>>>,
-    pub log: Vec<LogEntry>,
-    pub role: Arc<RwLock<NodeRole>>,
-    /// Peer addresses as "host:port" strings (e.g. "node2:8002")
+    pub state: Arc<RwLock<RaftState>>,
     pub peers: Vec<String>,
     pub listen_addr: String,
 }
 
 impl RaftNode {
     pub fn new(id: u64, peers: Vec<String>, listen_addr: String) -> Self {
+        let state = RaftState {
+            current_term: 0,
+            voted_for: None,
+            log: Vec::new(),
+            role: NodeRole::Follower,
+        };
         RaftNode {
             id,
-            current_term: Arc::new(RwLock::new(0)),
-            voted_for: Arc::new(RwLock::new(None)),
-            log: Vec::new(),
-            role: Arc::new(RwLock::new(NodeRole::Follower)),
+            state: Arc::new(RwLock::new(state)),
             peers,
             listen_addr,
         }
     }
 
-    /// Starts the RPC listener in a background task, then runs the main state loop.
-    pub async fn run(&self) {
-        // Spawn the TCP RPC server as a background task
+    pub async fn run(&self, token: CancellationToken) {
         let addr = self.listen_addr.clone();
         let id = self.id;
-        let vf = self.voted_for.clone();
-        let ct = self.current_term.clone();
+        let state = self.state.clone();
+        let srv_token = token.clone();
+        
         tokio::spawn(async move {
-            start_rpc_server(addr, id, vf, ct).await;
+            start_rpc_server(addr, id, state, srv_token).await;
         });
 
-        // Small delay to let the server bind before sending RPCs
         sleep(Duration::from_millis(50)).await;
 
-        // Main state machine loop
         loop {
-            let role = *self.role.read().await;
-            match role {
-                NodeRole::Follower  => self.run_follower().await,
-                NodeRole::Candidate => self.run_candidate().await,
-                NodeRole::Leader    => self.run_leader().await,
+            if token.is_cancelled() {
+                info!("Node {}: stopping main state loop...", self.id);
+                break;
+            }
+
+            let role = { self.state.read().await.role };
+            
+            tokio::select! {
+                _ = token.cancelled() => {
+                    info!("Node {}: main loop cancelled.", self.id);
+                    break;
+                }
+                _ = async {
+                    match role {
+                        NodeRole::Follower  => self.run_follower().await,
+                        NodeRole::Candidate => self.run_candidate().await,
+                        NodeRole::Leader    => self.run_leader().await,
+                    }
+                } => {}
             }
         }
     }
 
     async fn run_follower(&self) {
-        let timeout_ms = rand::thread_rng().gen_range(150u64..300u64);
-        info!("Node {} [Follower] | term={} | election timeout in {}ms",
-            self.id, *self.current_term.read().await, timeout_ms);
+        let timeout_ms = rand::thread_rng().gen_range(150..300);
+        let term = { self.state.read().await.current_term };
+        info!("Node {} [Follower] | term={} | election timeout in {}ms", self.id, term, timeout_ms);
+        
         sleep(Duration::from_millis(timeout_ms)).await;
 
-        // No heartbeat received → promote to candidate
-        let mut role = self.role.write().await;
-        if *role == NodeRole::Follower {
+        let mut state = self.state.write().await;
+        if state.role == NodeRole::Follower {
             warn!("Node {}: heartbeat timeout — becoming Candidate", self.id);
-            *role = NodeRole::Candidate;
+            state.role = NodeRole::Candidate;
         }
     }
 
     async fn run_candidate(&self) {
-        // Increment term and vote for self
-        {
-            let mut ct = self.current_term.write().await;
-            *ct += 1;
-            let mut vf = self.voted_for.write().await;
-            *vf = Some(self.id);
-            info!("Node {} [Candidate] | started election for term {}", self.id, *ct);
-        }
+        let (term, quorum) = {
+            let mut state = self.state.write().await;
+            state.current_term += 1;
+            state.voted_for = Some(self.id);
+            info!("Node {} [Candidate] | started election for term {}", self.id, state.current_term);
+            (state.current_term, (self.peers.len() + 2) / 2)
+        };
 
-        let term = *self.current_term.read().await;
-        let quorum = (self.peers.len() + 2) / 2; // majority of total cluster
-        let mut votes: usize = 1; // self-vote
+        let mut votes: usize = 1;
 
-        // Send RequestVote RPCs to all peers concurrently
         let mut handles = Vec::new();
         for peer_addr in &self.peers {
             let addr = peer_addr.clone();
@@ -130,38 +135,34 @@ impl RaftNode {
                     votes += 1;
                     info!("Node {} [Candidate] | got vote — total: {}/{}", self.id, votes, self.peers.len() + 1);
                 }
-                // If a peer has a higher term, step down
                 if resp.term > term {
-                    let mut ct = self.current_term.write().await;
-                    *ct = resp.term;
-                    let mut role = self.role.write().await;
-                    *role = NodeRole::Follower;
+                    let mut state = self.state.write().await;
+                    state.current_term = resp.term;
+                    state.role = NodeRole::Follower;
                     warn!("Node {}: discovered higher term {} — stepping down", self.id, resp.term);
                     return;
                 }
             }
         }
 
-        let mut role = self.role.write().await;
-        if votes >= quorum {
-            info!("Node {} [LEADER] | quorum reached ({}/{}) — I am the new LEADER for term {}!",
-                self.id, votes, self.peers.len() + 1, term);
-            *role = NodeRole::Leader;
-        } else {
-            warn!("Node {} [Candidate] | election failed ({}/{}) — back to Follower",
-                self.id, votes, self.peers.len() + 1);
-            *role = NodeRole::Follower;
-            // Clear vote to allow voting in next term
-            let mut vf = self.voted_for.write().await;
-            *vf = None;
+        let mut state = self.state.write().await;
+        // Check if role is still Candidate (might have received AppendEntries while awaiting)
+        if state.role == NodeRole::Candidate {
+            if votes >= quorum {
+                info!("Node {} [LEADER] | quorum reached ({}/{}) — I am the new LEADER for term {}!", self.id, votes, self.peers.len() + 1, term);
+                state.role = NodeRole::Leader;
+            } else {
+                warn!("Node {} [Candidate] | election failed ({}/{}) — back to Follower", self.id, votes, self.peers.len() + 1);
+                state.role = NodeRole::Follower;
+                state.voted_for = None;
+            }
         }
     }
 
     async fn run_leader(&self) {
-        let term = *self.current_term.read().await;
+        let term = { self.state.read().await.current_term };
         info!("Node {} [Leader] | sending AppendEntries (heartbeat) for term {}", self.id, term);
 
-        // Send AppendEntries heartbeats to all peers concurrently
         let mut handles = Vec::new();
         for peer_addr in &self.peers {
             let addr = peer_addr.clone();
@@ -181,18 +182,15 @@ impl RaftNode {
         for handle in handles {
             if let Ok(Some(resp)) = handle.await {
                 if resp.term > term {
-                    // Higher term found — step down
-                    let mut ct = self.current_term.write().await;
-                    *ct = resp.term;
-                    let mut role = self.role.write().await;
-                    *role = NodeRole::Follower;
+                    let mut state = self.state.write().await;
+                    state.current_term = resp.term;
+                    state.role = NodeRole::Follower;
                     warn!("Node {}: discovered higher term {} — stepping down from Leader", self.id, resp.term);
                     return;
                 }
             }
         }
 
-        // Heartbeat interval: 50ms
         sleep(Duration::from_millis(50)).await;
     }
 }
