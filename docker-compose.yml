@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  node1:
+    build: .
+    container_name: raftkv-node1
+    environment:
+      - NODE_ID=1
+      - LISTEN_ADDR=0.0.0.0:8001
+      - PEERS=node2:8002,node3:8003
+      - RUST_LOG=info
+    ports:
+      - "8001:8001"
+    networks:
+      - raft-net
+
+  node2:
+    build: .
+    container_name: raftkv-node2
+    environment:
+      - NODE_ID=2
+      - LISTEN_ADDR=0.0.0.0:8002
+      - PEERS=node1:8001,node3:8003
+      - RUST_LOG=info
+    ports:
+      - "8002:8002"
+    networks:
+      - raft-net
+
+  node3:
+    build: .
+    container_name: raftkv-node3
+    environment:
+      - NODE_ID=3
+      - LISTEN_ADDR=0.0.0.0:8003
+      - PEERS=node1:8001,node2:8002
+      - RUST_LOG=info
+    ports:
+      - "8003:8003"
+    networks:
+      - raft-net
+
+networks:
+  raft-net:
+    driver: bridge
