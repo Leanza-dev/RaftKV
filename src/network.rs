@@ -1,5 +1,5 @@
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use serde::{Serialize, Deserialize};
 use log::{info, warn, error};
@@ -88,22 +88,31 @@ pub async fn send_append_entries(peer_addr: &str, req: AppendEntriesReq) -> Opti
     send_rpc_and_recv::<AppendEntriesResp>(stream, RpcMessage::AppendEntries(req)).await
 }
 
-/// Generic helper: serialises `msg` as newline-delimited JSON, writes it, and
-/// reads back a single newline-delimited JSON response deserialised as `R`.
+/// Generic helper: serialises `msg` as bincode with a length prefix, writes it, and
+/// reads back a length-prefixed bincode response deserialised as `R`.
 async fn send_rpc_and_recv<R>(mut stream: TcpStream, msg: RpcMessage) -> Option<R>
 where
     R: for<'de> Deserialize<'de>,
 {
-    let mut payload = serde_json::to_string(&msg).ok()?;
-    payload.push('\n');
+    let payload = bincode::serialize(&msg).ok()?;
+    let len = payload.len() as u32;
 
-    stream.write_all(payload.as_bytes()).await.ok()?;
+    stream.write_all(&len.to_be_bytes()).await.ok()?;
+    stream.write_all(&payload).await.ok()?;
 
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).await.ok()?;
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await.ok()?;
+    let resp_len = u32::from_be_bytes(len_buf) as usize;
 
-    serde_json::from_str(line.trim()).ok()
+    if resp_len > 1024 * 1024 {
+        warn!("Response payload too large: {} bytes", resp_len);
+        return None;
+    }
+
+    let mut resp_buf = vec![0u8; resp_len];
+    stream.read_exact(&mut resp_buf).await.ok()?;
+
+    bincode::deserialize(&resp_buf).ok()
 }
 
 // ─── TCP RPC Server ───────────────────────────────────────────────────────────
@@ -144,20 +153,29 @@ pub async fn start_rpc_server(
 }
 
 async fn handle_rpc_connection(
-    stream: TcpStream,
+    mut stream: TcpStream,
     peer: String,
     node_id: u64,
     voted_for: std::sync::Arc<tokio::sync::RwLock<Option<u64>>>,
     current_term: std::sync::Arc<tokio::sync::RwLock<u64>>,
 ) {
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).await.is_err() {
+        return;
+    }
+    let req_len = u32::from_be_bytes(len_buf) as usize;
 
-    if reader.read_line(&mut line).await.is_err() {
+    if req_len > 1024 * 1024 {
+        warn!("Node {}: payload too large from {}: {} bytes (OOM Protection)", node_id, peer, req_len);
         return;
     }
 
-    let msg: RpcMessage = match serde_json::from_str(line.trim()) {
+    let mut req_buf = vec![0u8; req_len];
+    if stream.read_exact(&mut req_buf).await.is_err() {
+        return;
+    }
+
+    let msg: RpcMessage = match bincode::deserialize(&req_buf) {
         Ok(m) => m,
         Err(e) => {
             warn!("Node {}: malformed RPC from {}: {}", node_id, peer, e);
@@ -165,7 +183,7 @@ async fn handle_rpc_connection(
         }
     };
 
-    match msg {
+    let resp_msg = match msg {
         RpcMessage::RequestVote(req) => {
             let ct = *current_term.read().await;
             let mut vf = voted_for.write().await;
@@ -179,21 +197,22 @@ async fn handle_rpc_connection(
                 info!("Node {}: denied vote to Node {} (already voted or stale term)", node_id, req.candidate_id);
             }
 
-            let resp = RequestVoteResp { term: ct, vote_granted };
-            let mut payload = serde_json::to_string(&resp).unwrap_or_default();
-            payload.push('\n');
-            let _ = reader.get_mut().write_all(payload.as_bytes()).await;
+            RpcMessage::RequestVoteResp(RequestVoteResp { term: ct, vote_granted })
         }
         RpcMessage::AppendEntries(req) => {
             let ct = *current_term.read().await;
             let success = req.term >= ct;
-            let resp = AppendEntriesResp { term: ct, success };
-            let mut payload = serde_json::to_string(&resp).unwrap_or_default();
-            payload.push('\n');
-            let _ = reader.get_mut().write_all(payload.as_bytes()).await;
+            RpcMessage::AppendEntriesResp(AppendEntriesResp { term: ct, success })
         }
         _ => {
             warn!("Node {}: unexpected RPC type from {}", node_id, peer);
+            return;
         }
+    };
+
+    if let Ok(payload) = bincode::serialize(&resp_msg) {
+        let len = payload.len() as u32;
+        let _ = stream.write_all(&len.to_be_bytes()).await;
+        let _ = stream.write_all(&payload).await;
     }
 }
