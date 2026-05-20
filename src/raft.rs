@@ -17,6 +17,10 @@ pub enum NodeRole {
     Leader,
 }
 
+/// Entrada de log do Raft — usada para replicação de comandos entre nós.
+/// Atualmente definida como stub arquitetural; a replicação de log completa
+/// está no roadmap (ver README). Silenciamos o dead_code enquanto implementamos.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub term: u64,
@@ -26,6 +30,8 @@ pub struct LogEntry {
 pub struct RaftState {
     pub current_term: u64,
     pub voted_for: Option<u64>,
+    /// WAL de replicação de log — stub para a implementação futura de AppendEntries com entradas reais.
+    #[allow(dead_code)]
     pub log: Vec<LogEntry>,
     pub role: NodeRole,
 }
