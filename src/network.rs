@@ -1,4 +1,4 @@
-use crate::raft::RaftState;
+use crate::raft::{last_log_info, NodeRole, RaftState};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -185,23 +185,34 @@ async fn handle_rpc_connection(
 
     let resp_msg = match msg {
         RpcMessage::RequestVote(req) => {
-            // Atomic mutation logic
             let mut st = state.write().await;
 
+            // Fix Err#2: Step down immediately if we see a higher term.
+            if req.term > st.current_term {
+                st.current_term = req.term;
+                st.voted_for = None;
+                st.role = NodeRole::Follower;
+            }
+
+            // §5.4.1 Log Completeness: only grant vote if candidate log is at least as
+            // up-to-date as ours (Fix Err#1).
+            let (our_lli, our_llt) = last_log_info(&st);
+            let candidate_log_ok = req.last_log_term > our_llt
+                || (req.last_log_term == our_llt && req.last_log_index >= our_lli);
+
             let vote_granted = req.term >= st.current_term
-                && (st.voted_for.is_none() || st.voted_for == Some(req.candidate_id));
+                && (st.voted_for.is_none() || st.voted_for == Some(req.candidate_id))
+                && candidate_log_ok;
+
             if vote_granted {
                 st.voted_for = Some(req.candidate_id);
-                if req.term > st.current_term {
-                    st.current_term = req.term;
-                }
                 info!(
                     "Node {}: granted vote to Node {} for term {}",
                     node_id, req.candidate_id, req.term
                 );
             } else {
                 info!(
-                    "Node {}: denied vote to Node {} (already voted or stale term)",
+                    "Node {}: denied vote to Node {} (stale log or term, or already voted)",
                     node_id, req.candidate_id
                 );
             }
