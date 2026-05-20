@@ -1,0 +1,46 @@
+name: Rust Continuous Integration
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build_and_test:
+    name: Build, Lint & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Verify Types and Dependencies (Cargo Check)
+        run: cargo check --all-targets
+
+      - name: Check Code Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Linter (Clippy)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Complete Test Suite
+        run: cargo test --all-targets --workspace --verbose
