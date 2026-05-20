@@ -9,12 +9,10 @@ use tokio::sync::RwLock;
 /// Currently, it serves as an architectural stub awaiting integration with RaftNode.
 /// The storage layer will be connected to the replication log when
 /// AppendEntries with actual entries is implemented (see Roadmap in README).
-#[allow(dead_code)]
 pub struct KeyValueStore {
     data: Arc<RwLock<HashMap<String, String>>>,
 }
 
-#[allow(dead_code)]
 impl KeyValueStore {
     pub fn new() -> Self {
         KeyValueStore {

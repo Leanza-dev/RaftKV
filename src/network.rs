@@ -108,6 +108,7 @@ pub async fn start_rpc_server(
     listen_addr: String,
     node_id: u64,
     state: std::sync::Arc<tokio::sync::RwLock<RaftState>>,
+    store: std::sync::Arc<crate::store::KeyValueStore>,
     token: CancellationToken,
 ) {
     let listener = match TcpListener::bind(&listen_addr).await {
@@ -134,8 +135,9 @@ pub async fn start_rpc_server(
                 match accept_res {
                     Ok((stream, peer)) => {
                         let st = state.clone();
+                        let st_store = store.clone();
                         tokio::spawn(async move {
-                            handle_rpc_connection(stream, peer.to_string(), node_id, st).await;
+                            handle_rpc_connection(stream, peer.to_string(), node_id, st, st_store).await;
                         });
                     }
                     Err(e) => {
@@ -152,6 +154,7 @@ async fn handle_rpc_connection(
     peer: String,
     node_id: u64,
     state: std::sync::Arc<tokio::sync::RwLock<RaftState>>,
+    store: std::sync::Arc<crate::store::KeyValueStore>,
 ) {
     let mut len_buf = [0u8; 4];
     if stream.read_exact(&mut len_buf).await.is_err() {
@@ -215,9 +218,29 @@ async fn handle_rpc_connection(
                     st.current_term = req.term;
                     st.voted_for = None;
                 }
+                
+                // Append entries to log
+                if !req.entries.is_empty() {
+                    for cmd in req.entries {
+                        st.log.push(crate::raft::LogEntry {
+                            term: req.term,
+                            command: cmd.clone(),
+                        });
+                        
+                        // Parse command and apply to store (e.g. SET key val)
+                        let parts: Vec<&str> = cmd.split_whitespace().collect();
+                        if parts.len() >= 3 && parts[0] == "SET" {
+                            let key = parts[1].to_string();
+                            let val = parts[2..].join(" ");
+                            store.set(key, val).await;
+                        }
+                    }
+                    st.commit_index = st.log.len() as u64;
+                    st.last_applied = st.commit_index;
+                }
+
                 // When append entries is received successfully, we should step down to Follower
-                // if we are a Candidate. This is handled gracefully next time the main loop
-                // evaluates the state, but we ensure consistency here.
+                // if we are a Candidate.
                 st.role = crate::raft::NodeRole::Follower;
             }
             RpcMessage::AppendEntriesResp(AppendEntriesResp {
