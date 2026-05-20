@@ -1,10 +1,10 @@
+use crate::raft::RaftState;
+use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use serde::{Serialize, Deserialize};
-use log::{info, warn, error};
 use tokio_util::sync::CancellationToken;
-use crate::raft::RaftState;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppendEntriesReq {
@@ -61,7 +61,10 @@ pub async fn send_request_vote(peer_addr: &str, req: RequestVoteReq) -> Option<R
     send_rpc_and_recv::<RequestVoteResp>(stream, RpcMessage::RequestVote(req)).await
 }
 
-pub async fn send_append_entries(peer_addr: &str, req: AppendEntriesReq) -> Option<AppendEntriesResp> {
+pub async fn send_append_entries(
+    peer_addr: &str,
+    req: AppendEntriesReq,
+) -> Option<AppendEntriesResp> {
     let timeout = Duration::from_millis(100);
     let stream = match tokio::time::timeout(timeout, TcpStream::connect(peer_addr)).await {
         Ok(Ok(s)) => s,
@@ -113,7 +116,10 @@ pub async fn start_rpc_server(
             l
         }
         Err(e) => {
-            error!("Node {}: failed to bind RPC listener on {}: {}", node_id, listen_addr, e);
+            error!(
+                "Node {}: failed to bind RPC listener on {}: {}",
+                node_id, listen_addr, e
+            );
             return;
         }
     };
@@ -154,7 +160,10 @@ async fn handle_rpc_connection(
     let req_len = u32::from_be_bytes(len_buf) as usize;
 
     if req_len > 1024 * 1024 {
-        warn!("Node {}: payload too large from {}: {} bytes (OOM Protection)", node_id, peer, req_len);
+        warn!(
+            "Node {}: payload too large from {}: {} bytes (OOM Protection)",
+            node_id, peer, req_len
+        );
         return;
     }
 
@@ -175,18 +184,28 @@ async fn handle_rpc_connection(
         RpcMessage::RequestVote(req) => {
             // Atomic mutation logic
             let mut st = state.write().await;
-            
-            let vote_granted = req.term >= st.current_term && (st.voted_for.is_none() || st.voted_for == Some(req.candidate_id));
+
+            let vote_granted = req.term >= st.current_term
+                && (st.voted_for.is_none() || st.voted_for == Some(req.candidate_id));
             if vote_granted {
                 st.voted_for = Some(req.candidate_id);
                 if req.term > st.current_term {
                     st.current_term = req.term;
                 }
-                info!("Node {}: granted vote to Node {} for term {}", node_id, req.candidate_id, req.term);
+                info!(
+                    "Node {}: granted vote to Node {} for term {}",
+                    node_id, req.candidate_id, req.term
+                );
             } else {
-                info!("Node {}: denied vote to Node {} (already voted or stale term)", node_id, req.candidate_id);
+                info!(
+                    "Node {}: denied vote to Node {} (already voted or stale term)",
+                    node_id, req.candidate_id
+                );
             }
-            RpcMessage::RequestVoteResp(RequestVoteResp { term: st.current_term, vote_granted })
+            RpcMessage::RequestVoteResp(RequestVoteResp {
+                term: st.current_term,
+                vote_granted,
+            })
         }
         RpcMessage::AppendEntries(req) => {
             let mut st = state.write().await;
@@ -197,11 +216,14 @@ async fn handle_rpc_connection(
                     st.voted_for = None;
                 }
                 // When append entries is received successfully, we should step down to Follower
-                // if we are a Candidate. This is handled gracefully next time the main loop 
+                // if we are a Candidate. This is handled gracefully next time the main loop
                 // evaluates the state, but we ensure consistency here.
                 st.role = crate::raft::NodeRole::Follower;
             }
-            RpcMessage::AppendEntriesResp(AppendEntriesResp { term: st.current_term, success })
+            RpcMessage::AppendEntriesResp(AppendEntriesResp {
+                term: st.current_term,
+                success,
+            })
         }
         _ => {
             warn!("Node {}: unexpected RPC type from {}", node_id, peer);

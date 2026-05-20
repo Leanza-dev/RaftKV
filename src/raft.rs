@@ -1,15 +1,13 @@
+use log::{info, warn};
+use rand::Rng;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
-use tokio::time::{sleep, Duration};
 use tokio::task::JoinSet;
-use rand::Rng;
-use log::{info, warn};
+use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::network::{
-    send_request_vote, send_append_entries,
-    start_rpc_server,
-    RequestVoteReq, AppendEntriesReq,
+    send_append_entries, send_request_vote, start_rpc_server, AppendEntriesReq, RequestVoteReq,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,7 +58,7 @@ impl RaftNode {
         let id = self.id;
         let state = self.state.clone();
         let srv_token = token.clone();
-        
+
         tokio::spawn(async move {
             start_rpc_server(addr, id, state, srv_token).await;
         });
@@ -74,7 +72,7 @@ impl RaftNode {
             }
 
             let role = { self.state.read().await.role };
-            
+
             tokio::select! {
                 _ = token.cancelled() => {
                     info!("Node {}: main loop cancelled.", self.id);
@@ -94,8 +92,11 @@ impl RaftNode {
     async fn run_follower(&self) {
         let timeout_ms = rand::thread_rng().gen_range(150..300);
         let term = { self.state.read().await.current_term };
-        info!("Node {} [Follower] | term={} | election timeout in {}ms", self.id, term, timeout_ms);
-        
+        info!(
+            "Node {} [Follower] | term={} | election timeout in {}ms",
+            self.id, term, timeout_ms
+        );
+
         sleep(Duration::from_millis(timeout_ms)).await;
 
         let mut state = self.state.write().await;
@@ -110,7 +111,10 @@ impl RaftNode {
             let mut state = self.state.write().await;
             state.current_term += 1;
             state.voted_for = Some(self.id);
-            info!("Node {} [Candidate] | started election for term {}", self.id, state.current_term);
+            info!(
+                "Node {} [Candidate] | started election for term {}",
+                self.id, state.current_term
+            );
             (state.current_term, (self.peers.len() + 2) / 2)
         };
 
@@ -140,13 +144,21 @@ impl RaftNode {
             if let Ok(Some(resp)) = res {
                 if resp.vote_granted {
                     votes += 1;
-                    info!("Node {} [Candidate] | got vote — total: {}/{}", self.id, votes, self.peers.len() + 1);
+                    info!(
+                        "Node {} [Candidate] | got vote — total: {}/{}",
+                        self.id,
+                        votes,
+                        self.peers.len() + 1
+                    );
                 }
                 if resp.term > term {
                     let mut state = self.state.write().await;
                     state.current_term = resp.term;
                     state.role = NodeRole::Follower;
-                    warn!("Node {}: discovered higher term {} — stepping down", self.id, resp.term);
+                    warn!(
+                        "Node {}: discovered higher term {} — stepping down",
+                        self.id, resp.term
+                    );
                     return;
                 }
                 if votes >= quorum {
@@ -155,7 +167,7 @@ impl RaftNode {
                 }
             }
         }
-        
+
         // Abort any remaining pending vote requests
         set.abort_all();
 
@@ -163,16 +175,28 @@ impl RaftNode {
         // Check if role is still Candidate (might have received AppendEntries while awaiting)
         if state.role == NodeRole::Candidate {
             if votes >= quorum {
-                info!("Node {} [LEADER] | quorum reached ({}/{}) — I am the new LEADER for term {}!", self.id, votes, self.peers.len() + 1, term);
+                info!(
+                    "Node {} [LEADER] | quorum reached ({}/{}) — I am the new LEADER for term {}!",
+                    self.id,
+                    votes,
+                    self.peers.len() + 1,
+                    term
+                );
                 state.role = NodeRole::Leader;
-                
+
                 // Isolamento de I/O pesado (Write-Ahead Log fsync) para evitar Thread Starvation
                 let _ = tokio::task::spawn_blocking(move || {
                     // Simulação de fsync em disco
                     std::thread::sleep(std::time::Duration::from_millis(5));
-                }).await;
+                })
+                .await;
             } else {
-                warn!("Node {} [Candidate] | election failed ({}/{}) — back to Follower", self.id, votes, self.peers.len() + 1);
+                warn!(
+                    "Node {} [Candidate] | election failed ({}/{}) — back to Follower",
+                    self.id,
+                    votes,
+                    self.peers.len() + 1
+                );
                 state.role = NodeRole::Follower;
                 state.voted_for = None;
             }
@@ -181,7 +205,10 @@ impl RaftNode {
 
     async fn run_leader(&self) {
         let term = { self.state.read().await.current_term };
-        info!("Node {} [Leader] | sending AppendEntries (heartbeat) for term {}", self.id, term);
+        info!(
+            "Node {} [Leader] | sending AppendEntries (heartbeat) for term {}",
+            self.id, term
+        );
 
         let mut set = JoinSet::new();
         let semaphore = Arc::new(Semaphore::new(50)); // Controle de microbursts
@@ -210,7 +237,10 @@ impl RaftNode {
                     let mut state = self.state.write().await;
                     state.current_term = resp.term;
                     state.role = NodeRole::Follower;
-                    warn!("Node {}: discovered higher term {} — stepping down from Leader", self.id, resp.term);
+                    warn!(
+                        "Node {}: discovered higher term {} — stepping down from Leader",
+                        self.id, resp.term
+                    );
                     return;
                 }
             }

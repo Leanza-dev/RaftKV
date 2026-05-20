@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// O armazenamento de dados em memória. 
-/// Usamos RwLock (Read-Write Lock) assíncrono para permitir múltiplas leituras 
+/// O armazenamento de dados em memória.
+/// Usamos RwLock (Read-Write Lock) assíncrono para permitir múltiplas leituras
 /// concorrentes (alta performance) mas exclusividade na escrita.
 pub struct KeyValueStore {
     data: Arc<RwLock<HashMap<String, String>>>,
