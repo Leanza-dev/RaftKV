@@ -2,6 +2,10 @@
 
 > [🇺🇸 English](./README.md) | 🇧🇷 Português
 
+📚 **Recursos Técnicos de Engenharia:**
+*   [**Especificação da Arquitetura (ARCHITECTURE.md)**](./ARCHITECTURE.md) — Modelos de concorrência multi-thread, prevenção de leaks de memória e escala de recursos.
+*   [**Governança & Manual da IA (CLAUDE.md)**](./CLAUDE.md) — Regras corporativas, guardrails de desenvolvimento e governança técnica de IA.
+
 **Implementação assíncrona e de alta performance do Algoritmo de Consenso Raft em Rust, alimentando um banco de dados chave-valor distribuído.**
 
 ![Raft](https://img.shields.io/badge/Algoritmo-Raft-blue.svg)

@@ -2,6 +2,10 @@
 
 > 🇺🇸 English | [🇧🇷 Português](./README.pt-BR.md)
 
+📚 **Deep Dive Technical Resources:**
+*   [**System Architecture Blueprint (ARCHITECTURE.md)**](./ARCHITECTURE.md) — Multi-threaded concurrency models, memory leak prevention, resource scaling.
+*   [**Governança & Manual da IA (CLAUDE.md)**](./CLAUDE.md) — Regras corporativas, guardrails de desenvolvimento e governança técnica.
+
 **An advanced architectural case study in distributed consensus — implementing the Raft algorithm from scratch in Rust to explore leader election, log replication, and fault tolerance under real network conditions.**
 
 ![Raft](https://img.shields.io/badge/Algorithm-Raft-blue.svg)

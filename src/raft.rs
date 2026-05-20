@@ -1,6 +1,7 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tokio::time::{sleep, Duration};
+use tokio::task::JoinSet;
 use rand::Rng;
 use log::{info, warn};
 use tokio_util::sync::CancellationToken;
@@ -115,7 +116,10 @@ impl RaftNode {
 
         let mut votes: usize = 1;
 
-        let mut handles = Vec::new();
+        let mut set = JoinSet::new();
+        // Limita requisições concorrentes para evitar fan-out microbursts em grandes clusters
+        let semaphore = Arc::new(Semaphore::new(50));
+
         for peer_addr in &self.peers {
             let addr = peer_addr.clone();
             let req = RequestVoteReq {
@@ -124,13 +128,16 @@ impl RaftNode {
                 last_log_index: 0,
                 last_log_term: 0,
             };
-            handles.push(tokio::spawn(async move {
-                send_request_vote(&addr, req).await
-            }));
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            set.spawn(async move {
+                let res = send_request_vote(&addr, req).await;
+                drop(permit); // Libera o slot no pool
+                res
+            });
         }
 
-        for handle in handles {
-            if let Ok(Some(resp)) = handle.await {
+        while let Some(res) = set.join_next().await {
+            if let Ok(Some(resp)) = res {
                 if resp.vote_granted {
                     votes += 1;
                     info!("Node {} [Candidate] | got vote — total: {}/{}", self.id, votes, self.peers.len() + 1);
@@ -142,8 +149,15 @@ impl RaftNode {
                     warn!("Node {}: discovered higher term {} — stepping down", self.id, resp.term);
                     return;
                 }
+                if votes >= quorum {
+                    // Early exit if we reached quorum!
+                    break;
+                }
             }
         }
+        
+        // Abort any remaining pending vote requests
+        set.abort_all();
 
         let mut state = self.state.write().await;
         // Check if role is still Candidate (might have received AppendEntries while awaiting)
@@ -151,6 +165,12 @@ impl RaftNode {
             if votes >= quorum {
                 info!("Node {} [LEADER] | quorum reached ({}/{}) — I am the new LEADER for term {}!", self.id, votes, self.peers.len() + 1, term);
                 state.role = NodeRole::Leader;
+                
+                // Isolamento de I/O pesado (Write-Ahead Log fsync) para evitar Thread Starvation
+                let _ = tokio::task::spawn_blocking(move || {
+                    // Simulação de fsync em disco
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }).await;
             } else {
                 warn!("Node {} [Candidate] | election failed ({}/{}) — back to Follower", self.id, votes, self.peers.len() + 1);
                 state.role = NodeRole::Follower;
@@ -163,7 +183,9 @@ impl RaftNode {
         let term = { self.state.read().await.current_term };
         info!("Node {} [Leader] | sending AppendEntries (heartbeat) for term {}", self.id, term);
 
-        let mut handles = Vec::new();
+        let mut set = JoinSet::new();
+        let semaphore = Arc::new(Semaphore::new(50)); // Controle de microbursts
+
         for peer_addr in &self.peers {
             let addr = peer_addr.clone();
             let req = AppendEntriesReq {
@@ -174,13 +196,16 @@ impl RaftNode {
                 entries: vec![],
                 leader_commit: 0,
             };
-            handles.push(tokio::spawn(async move {
-                send_append_entries(&addr, req).await
-            }));
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            set.spawn(async move {
+                let res = send_append_entries(&addr, req).await;
+                drop(permit);
+                res
+            });
         }
 
-        for handle in handles {
-            if let Ok(Some(resp)) = handle.await {
+        while let Some(res) = set.join_next().await {
+            if let Ok(Some(resp)) = res {
                 if resp.term > term {
                     let mut state = self.state.write().await;
                     state.current_term = resp.term;
