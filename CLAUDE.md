@@ -1,33 +1,33 @@
 # CLAUDE.md - RaftKV AI Guide
 
-Este documento estabelece as diretrizes de governança, arquitetura e desenvolvimento para qualquer agente de IA operando no repositório **RaftKV**. Como Tech Lead deste projeto, exijo conformidade absoluta com as regras abaixo.
+This document establishes the governance, architectural, and developmental guidelines for any AI agent operating within the **RaftKV** repository. As the Tech Lead of this project, absolute compliance with the rules below is mandatory.
 
 ---
 
-## 🏗️ Diretrizes de Arquitetura (Rust & Tokio)
+## 🏗️ Architectural Guidelines (Rust & Tokio)
 
-O **RaftKV** é uma implementação assíncrona do algoritmo de consenso distribuído Raft escrita em Rust de alta performance.
+**RaftKV** is an asynchronous implementation of the Raft distributed consensus algorithm, written in high-performance Rust.
 
-*   **Runtime Assíncrono:** Uso exclusivo de `tokio` para rede e timers de eleição.
-*   **Segurança de Concorrência:** Locks assíncronos (`tokio::sync::RwLock` ou `Mutex`) em vez de locks síncronos da stdlib para evitar bloqueio de threads de worker do Tokio.
-*   **Paralelismo Resiliente:** Uso de `tokio::task::JoinSet` para dispatch concorrente de RPCs (`RequestVote` e `AppendEntries`) com timeouts estritos.
-
----
-
-## 🚫 Regras Inquebráveis (Guardrails)
-
-1.  **Exigência Semântica RAII:** Todo recurso do SO (Sockets TCP, Arquivos de Log) deve ser encapsulado em tipos que implementam `Drop` para liberação automática e determinística em caso de aborto de Tasks.
-2.  **I/O Bloqueante Proibido:** Nenhuma chamada que faça bloqueio síncrono (ex: leitura de arquivos sem tokio, sockets síncronos, sleep da biblioteca padrão) pode rodar diretamente na thread do executor. Use obrigatoriamente `tokio::task::spawn_blocking`.
-3.  **Locks Lock-Free ou Curtos:** Locks concorrentes devem ser adquiridos pelo menor tempo possível. Nunca mantenha um Lock de Escrita (`write().await`) ativo através de chamadas RPC de rede (`await`).
-4.  **Tratamento de Erros Explícito:** Proibido o uso de `.unwrap()` ou `.expect()` em código de produção. Trate todos os erros com `Result` e propague-os usando o operador `?` ou trate-os localmente de forma resiliente.
+*   **Asynchronous Runtime:** Exclusive use of `tokio` for networking and election timers.
+*   **Concurrency Safety:** Asynchronous locks (`tokio::sync::RwLock` or `Mutex`) instead of stdlib synchronous locks to prevent blocking Tokio worker threads.
+*   **Resilient Parallelism:** Use of `tokio::task::JoinSet` for concurrent dispatch of RPCs (`RequestVote` and `AppendEntries`) with strict timeouts.
 
 ---
 
-## 🛠️ Comandos Frequentes
+## 🚫 Unbreakable Rules (Guardrails)
 
-*   **Build/Check:** `cargo check` (validação rápida de tipos)
-*   **Compilar:** `cargo build --release`
-*   **Executar Testes:** `cargo test`
-*   **Formatação:** `cargo fmt`
+1.  **RAII Semantic Requirement:** Every OS resource (TCP Sockets, Log Files) must be encapsulated in types that implement `Drop` for automatic and deterministic release upon Task abort.
+2.  **No Blocking I/O:** No synchronous blocking calls (e.g., standard file reads, synchronous sockets, standard library sleep) may run directly on the executor thread. Use `tokio::task::spawn_blocking` without exception.
+3.  **Lock-Free or Short Locks:** Concurrent locks must be held for the shortest possible duration. Never hold a Write Lock (`write().await`) across network RPC calls (`await`).
+4.  **Explicit Error Handling:** The use of `.unwrap()` or `.expect()` is prohibited in production code. Handle all errors using `Result` and propagate them using the `?` operator or handle them locally and resiliently.
+
+---
+
+## 🛠️ Frequent Commands
+
+*   **Build/Check:** `cargo check` (fast type validation)
+*   **Compile:** `cargo build --release`
+*   **Run Tests:** `cargo test`
+*   **Format:** `cargo fmt`
 *   **Linting:** `cargo clippy -- -D warnings`
-*   **Execução Manual:** `cargo run` (requer variáveis de ambiente descritas no README)
+*   **Manual Execution:** `cargo run` (requires environment variables described in the README)

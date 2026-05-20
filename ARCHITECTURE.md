@@ -1,17 +1,17 @@
 # Engineering at Scale: RaftKV Architecture
 
-Bem-vindo ao *Architecture Decision Record* (ADR) do RaftKV. Este documento expõe as decisões de design que nos permitem atingir latências de eleição na casa dos milissegundos e resiliência a partições de rede, focando em segurança de memória e concorrência extrema.
+Welcome to the RaftKV *Architecture Decision Record* (ADR). This document details the design decisions that allow us to achieve election latencies in the millisecond range and resilience to network partitions, focusing on memory safety and extreme concurrency.
 
-## 1. Concorrência Dinâmica com `JoinSet`
-Em sistemas distribuídos, o *Head-of-Line Blocking* é letal. A latência de um nó nunca deve definir o *throughput* do cluster.
-- **A Solução:** Utilizamos o `tokio::task::JoinSet` para paralelizar as chamadas RPC (`RequestVote` e `AppendEntries`). Isso permite processar as respostas na ordem exata de chegada (`join_next().await`).
-- **Fail-Fast Gracioso:** No instante em que atingimos o Quórum de votos (maioria simples), nós assumimos a liderança instantaneamente e disparamos `set.abort_all()`.
-- **Prevenção de Resource Leaks:** Ao invés de vazar conexões, o abortamento das tasks no Tokio aciona o `Drop` da Future, que realiza um *graceful teardown* no nível do socket (ex: enviando um pacote FIN), devolvendo os recursos ao Sistema Operacional imediatamente.
+## 1. Dynamic Concurrency with `JoinSet`
+In distributed systems, *Head-of-Line Blocking* is lethal. A single node's latency should never define the cluster's *throughput*.
+- **The Solution:** We use `tokio::task::JoinSet` to parallelize RPC calls (`RequestVote` and `AppendEntries`). This allows processing responses in the exact order of arrival (`join_next().await`).
+- **Graceful Fail-Fast:** The instant we reach Quorum (simple majority), we assume leadership immediately and trigger `set.abort_all()`.
+- **Resource Leak Prevention:** Instead of leaking connections, aborting tasks in Tokio triggers the Future's `Drop`, performing a graceful teardown at the socket level (e.g., sending a FIN packet), returning resources to the Operating System immediately.
 
-## 2. Mitigando Saturação de Rede (Microbursting)
-Com o uso de fan-out agressivo, enviar centenas de chamadas RPC simultaneamente para os *Learners* ou *Followers* criaria um pico agudo de tráfego (Microburst), estourando os buffers dos *switches* de rede.
-- **Defesa Ativa (Implementada):** Injetamos um `tokio::sync::Semaphore` na raiz do `JoinSet`. Ao adquirir *permits* (`acquire_owned`), limitamos a vazão concorrente a lotes seguros (ex: *Batches* de 50). Isso estabiliza a latência P99 e protege a infraestrutura de rede.
+## 2. Mitigating Network Saturation (Microbursting)
+With aggressive fan-out, sending hundreds of simultaneous RPC calls to *Learners* or *Followers* could create a sharp traffic spike (Microburst), overflowing network switch buffers.
+- **Active Defense (Implemented):** We inject a `tokio::sync::Semaphore` at the root of the `JoinSet`. By acquiring permits (`acquire_owned`), we limit concurrent throughput to safe batches (e.g., Batches of 50). This stabilizes P99 latency and protects the network infrastructure.
 
-## 3. Isolamento de CPU e Starvation
-O Raft exige escrita persistente num Log Seguro (Write-Ahead Log) no disco. Operações de *fsync* em disco são bloqueantes no nível do Kernel. Se executadas diretamente, causariam *Thread Starvation* no *worker* do Tokio.
-- **Defesa Ativa:** Todo I/O bloqueante (ou simulação futura) é isolado utilizando `tokio::task::spawn_blocking`. Isso despacha a carga para uma *Thread Pool* especializada, garantindo que o *loop* principal de eleição e *heartbeats* rode de forma 100% assíncrona, não preemptiva e imune a travamentos.
+## 3. CPU Isolation and Starvation
+Raft requires persistent writes to a secure Write-Ahead Log on disk. Disk *fsync* operations are blocking at the Kernel level. If executed directly, they would cause *Thread Starvation* on the Tokio worker.
+- **Active Defense:** All blocking I/O (or future simulations) is isolated using `tokio::task::spawn_blocking`. This dispatches the load to a specialized Thread Pool, ensuring the main election and heartbeat loop runs 100% asynchronously, non-preemptively, and immune to deadlocks.

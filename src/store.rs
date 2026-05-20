@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// O armazenamento de dados em memória.
-/// Usamos RwLock (Read-Write Lock) assíncrono para permitir múltiplas leituras
-/// concorrentes (alta performance) mas exclusividade na escrita.
+/// In-memory data storage.
+/// We use an asynchronous RwLock (Read-Write Lock) to allow multiple concurrent
+/// reads (high performance) while ensuring exclusive writes.
 ///
-/// Atualmente é um stub arquitetural aguardando integração com o RaftNode.
-/// A camada de armazenamento será conectada ao log de replicação quando
-/// o AppendEntries com entradas reais for implementado (ver Roadmap no README).
+/// Currently, it serves as an architectural stub awaiting integration with RaftNode.
+/// The storage layer will be connected to the replication log when
+/// AppendEntries with actual entries is implemented (see Roadmap in README).
 #[allow(dead_code)]
 pub struct KeyValueStore {
     data: Arc<RwLock<HashMap<String, String>>>,

@@ -17,9 +17,9 @@ pub enum NodeRole {
     Leader,
 }
 
-/// Entrada de log do Raft — usada para replicação de comandos entre nós.
-/// Atualmente definida como stub arquitetural; a replicação de log completa
-/// está no roadmap (ver README). Silenciamos o dead_code enquanto implementamos.
+/// Raft log entry — used for replicating commands across nodes.
+/// Currently defined as an architectural stub; full log replication
+/// is on the roadmap (see README). We silence dead_code while implementing.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -30,7 +30,7 @@ pub struct LogEntry {
 pub struct RaftState {
     pub current_term: u64,
     pub voted_for: Option<u64>,
-    /// WAL de replicação de log — stub para a implementação futura de AppendEntries com entradas reais.
+    /// Log replication WAL — stub for the future implementation of AppendEntries with actual entries.
     #[allow(dead_code)]
     pub log: Vec<LogEntry>,
     pub role: NodeRole,
@@ -127,7 +127,7 @@ impl RaftNode {
         let mut votes: usize = 1;
 
         let mut set = JoinSet::new();
-        // Limita requisições concorrentes para evitar fan-out microbursts em grandes clusters
+        // Limits concurrent requests to avoid fan-out microbursts in large clusters
         let semaphore = Arc::new(Semaphore::new(50));
 
         for peer_addr in &self.peers {
@@ -141,7 +141,7 @@ impl RaftNode {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             set.spawn(async move {
                 let res = send_request_vote(&addr, req).await;
-                drop(permit); // Libera o slot no pool
+                drop(permit); // Release the slot in the pool
                 res
             });
         }
@@ -190,9 +190,9 @@ impl RaftNode {
                 );
                 state.role = NodeRole::Leader;
 
-                // Isolamento de I/O pesado (Write-Ahead Log fsync) para evitar Thread Starvation
+                // Heavy I/O isolation (Write-Ahead Log fsync) to avoid Thread Starvation
                 let _ = tokio::task::spawn_blocking(move || {
-                    // Simulação de fsync em disco
+                    // Disk fsync simulation
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 })
                 .await;
@@ -217,7 +217,7 @@ impl RaftNode {
         );
 
         let mut set = JoinSet::new();
-        let semaphore = Arc::new(Semaphore::new(50)); // Controle de microbursts
+        let semaphore = Arc::new(Semaphore::new(50)); // Microburst control
 
         for peer_addr in &self.peers {
             let addr = peer_addr.clone();
