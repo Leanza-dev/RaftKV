@@ -164,7 +164,13 @@ impl RaftNode {
                 last_log_index,
                 last_log_term,
             };
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!("Node {}: semaphore closed, aborting election requests", self.id);
+                    break;
+                }
+            };
             set.spawn(async move {
                 let res = send_request_vote(&addr, req).await;
                 drop(permit);
@@ -266,7 +272,13 @@ impl RaftNode {
                 entries: entries_clone,
                 leader_commit: 0,
             };
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!("Node {}: semaphore closed, aborting AppendEntries broadcast", self.id);
+                    break;
+                }
+            };
             set.spawn(async move {
                 let res = send_append_entries(&addr, req).await;
                 drop(permit);
