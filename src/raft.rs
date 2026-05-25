@@ -181,7 +181,7 @@ impl RaftNode {
         while let Some(res) = set.join_next().await {
             if let Ok(Some(resp)) = res {
                 if resp.term > term {
-                    // Discovered a higher term — step down immediately (Fix Err#2).
+                    // Higher term discovered — step down immediately per Raft §5.1.
                     let mut state = self.state.write().await;
                     state.current_term = resp.term;
                     state.role = NodeRole::Follower;
@@ -233,7 +233,7 @@ impl RaftNode {
                 state.voted_for = None;
                 drop(state);
 
-                // Fix Err#3: Randomized backoff on split-vote to break election livelock.
+                // Per Raft §5.2, use randomized election timeouts to break potential election livelocks.
                 let backoff_ms = rand::thread_rng().gen_range(150u64..400u64);
                 sleep(Duration::from_millis(backoff_ms)).await;
             }
@@ -253,7 +253,7 @@ impl RaftNode {
         let mut set = JoinSet::new();
         let semaphore = Arc::new(Semaphore::new(50));
 
-        // Fix Err#4 & Err#5: Safe prev_log_info computation accounting for compaction offset.
+        // Compute prev_log_info accounting for snapshot compaction offset before broadcasting.
         let (prev_log_index, prev_log_term, entries) = {
             let state = self.state.read().await;
             let (lli, llt) = last_log_info(&state);
